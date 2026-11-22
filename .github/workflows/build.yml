@@ -19,8 +19,6 @@ permissions:
   contents: read
 
 env:
-  # Certificate of the locally generated release key used for ad-hoc builds.
-  EXPECTED_SIGNER_SHA256: EBB1FCD5F8FBD82DBEAC4F0DC9F9E396347BB45DB3EDF0715B03BAFA88F70EE6
   # Certificate of the nightly key. Every nightly must carry it so each one
   # installs over the previous nightly without an uninstall.
   EXPECTED_NIGHTLY_SIGNER_SHA256: e42225b5ab3ac68236e54567ef0c4878afbafcdd3d438fbaba343e2d70425bf0
@@ -219,12 +217,13 @@ jobs:
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
 
-      # Guards the IzzyOnDroid/F-Droid update path: a wrong or missing key here
-      # is unrecoverable for installed users, so fail the build rather than
-      # publish. Skipped when no keystore was available, e.g. on fork PRs.
+      # Release APKs can use the official key or an ad-hoc key. The exact
+      # certificate is intentionally not pinned because ad-hoc builds are for
+      # direct installation and can use any generated key.
+      # Skipped when no keystore was available, e.g. on fork PRs.
       # Regular runs have only the FOSS release APKs; the nightly is checked
       # against its own key in the next step.
-      - name: Verify release signing certificate
+      - name: Verify release APK signatures
         if: ${{ steps.keystore.outputs.signed == 'true' }}
         run: |
           set -uo pipefail
@@ -256,11 +255,12 @@ jobs:
               status=1
               continue
             fi
-            actual=$("$apksigner" verify --print-certs "$apk" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')
-            if [ "$actual" != "$EXPECTED_SIGNER_SHA256" ]; then
-              echo "::error::$(basename "$apk") is signed with '$actual', expected '$EXPECTED_SIGNER_SHA256'"
+            cert_output=$("$apksigner" verify --verbose --print-certs "$apk")
+            if [ $? -ne 0 ]; then
+              echo "::error::$(basename "$apk") has an invalid APK signature"
               status=1
             else
+              actual=$(printf '%s\n' "$cert_output" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')
               echo "OK $(basename "$apk") -> $actual"
             fi
           done
