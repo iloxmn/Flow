@@ -8,6 +8,12 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      release_apks:
+        description: Build release APKs for direct installation (ad-hoc signing cannot update official-signed installs).
+        type: boolean
+        required: false
+        default: false
 
 # Collapse superseded runs on branches and PRs. Tag runs publish the release
 # artifacts and must never be cancelled by a subsequent push.
@@ -106,13 +112,13 @@ jobs:
         run: chmod +x gradlew
 
       - name: Lint GitHub nightly
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') && !inputs.release_apks }}
         run: >
           ./gradlew :app:lintGithubNightly
           --build-cache --stacktrace
 
       - name: Lint GitHub release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_apks }}
         run: >
           ./gradlew :app:lintGithubRelease
           --build-cache --stacktrace
@@ -148,12 +154,13 @@ jobs:
         id: keystore
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          ADHOC_RELEASE_APKS: ${{ inputs.release_apks }}
         run: |
           if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
             echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > release.keystore
             echo "signed=true" >> "$GITHUB_OUTPUT"
             echo "Release keystore decoded."
-          elif [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
+          elif [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ] || [ "$ADHOC_RELEASE_APKS" = "true" ]; then
             keytool -genkeypair -noprompt \
               -keystore release.keystore \
               -storepass FlowRelease2026 \
@@ -170,7 +177,7 @@ jobs:
 
       - name: Decode nightly keystore
         id: nightly_keystore
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') && !inputs.release_apks }}
         env:
           NIGHTLY_KEYSTORE_BASE64: ${{ secrets.NIGHTLY_KEYSTORE_BASE64 }}
         run: |
@@ -187,10 +194,10 @@ jobs:
             echo "Nightly keystore secret is not available. This run's nightly is debug-signed and is not published."
           fi
 
-      # GitHub release APKs are only published from tags, and nightly is
-      # initWith(release), so regular runs build nightly in their place.
+      # Nightly is initWith(release), so regular runs build nightly in place
+      # of GitHub release APKs unless release_apks is explicitly requested.
       - name: Build CI APKs
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') && !inputs.release_apks }}
         run: >
           ./gradlew :app:assembleGithubNightly :app:assembleFossRelease
           ${{ github.event_name == 'pull_request' && '-Pflow.prBuild=true' || '' }}
@@ -206,7 +213,7 @@ jobs:
           LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
 
       - name: Build release APKs
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_apks }}
         run: >
           ./gradlew :app:assembleGithubRelease :app:assembleFossRelease
           --build-cache --stacktrace
@@ -225,6 +232,8 @@ jobs:
       # against its own key in the next step.
       - name: Verify release APK signatures
         if: ${{ steps.keystore.outputs.signed == 'true' }}
+        env:
+          INCLUDE_GITHUB_RELEASE_APKS: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_apks }}
         run: |
           set -uo pipefail
           apksigner=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -1)
@@ -234,7 +243,7 @@ jobs:
           fi
 
           apks=()
-          if [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
+          if [ "$INCLUDE_GITHUB_RELEASE_APKS" = "true" ]; then
             apks+=(
               app/build/outputs/apk/github/release/app-github-universal-release.apk
               app/build/outputs/apk/github/release/app-github-arm64-v8a-release.apk
@@ -269,7 +278,7 @@ jobs:
       # The run number in the file name is how the in-app updater tells
       # nightlies apart (GitHubRelease.toNightlyReleaseIfNewer).
       - name: Verify and name nightly APK
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') && !inputs.release_apks }}
         env:
           NIGHTLY_SIGNED: ${{ steps.nightly_keystore.outputs.signed }}
         run: |
@@ -305,11 +314,13 @@ jobs:
 
       - name: Report individual APK sizes
         shell: bash
+        env:
+          INCLUDE_GITHUB_RELEASE_APKS: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_apks }}
         run: |
           shopt -s nullglob
           apks=()
           expected=3
-          if [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
+          if [ "$INCLUDE_GITHUB_RELEASE_APKS" = "true" ]; then
             apks+=(
               app/build/outputs/apk/github/release/app-github-universal-release*.apk
               app/build/outputs/apk/github/release/app-github-arm64-v8a-release*.apk
@@ -339,7 +350,7 @@ jobs:
               printf '| `%s` | %s | %s |\n' "$(basename "$apk")" "$size" "$bytes"
             done
             echo
-            echo '> Release APKs are uploaded individually without compression; GitHub release APKs are built on tags only. Nightly remains a compressed artifact on regular CI runs.'
+            echo '> Release APKs are uploaded individually without compression. GitHub release APKs are built from version tags or an explicit manual dispatch; nightly remains a compressed artifact on regular CI runs.'
           } >> "$GITHUB_STEP_SUMMARY"
 
           # IzzyOnDroid ships the FOSS arm64-v8a APK and caps it at 30 MB; fail with a 0.5 MB margin so growth is seen before a release.
@@ -352,7 +363,7 @@ jobs:
 
       # The universal APKs are the README's download for any device; IzzyOnDroid ships the FOSS arm64-v8a APK.
       - name: Upload GitHub universal APK
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_apks }}
         uses: actions/upload-artifact@v7
         with:
           name: flow-github-universal-release-apk
@@ -362,7 +373,7 @@ jobs:
           compression-level: 0
 
       - name: Upload GitHub ARM64 APK
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_apks }}
         uses: actions/upload-artifact@v7
         with:
           name: flow-github-arm64-release-apk
@@ -372,7 +383,7 @@ jobs:
           compression-level: 0
 
       - name: Upload GitHub ARMv7 APK
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_apks }}
         uses: actions/upload-artifact@v7
         with:
           name: flow-github-armeabi-v7a-release-apk
@@ -382,7 +393,7 @@ jobs:
           compression-level: 0
 
       - name: Upload Nightly APK
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') && !inputs.release_apks }}
         uses: actions/upload-artifact@v7
         with:
           name: flow-nightly-apk
