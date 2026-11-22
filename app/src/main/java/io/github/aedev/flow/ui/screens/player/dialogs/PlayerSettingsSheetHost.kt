@@ -129,7 +129,7 @@ internal fun PlayerSettingsSheetHost(
             {
                 scope.launch { subtitleFilePicker.launch(viewModel.subtitleFolder()) }
                 Unit
-            }.takeIf { uiState.localFilePath != null },
+            },
         onAutoplayToggle = { viewModel.toggleAutoplay(it) },
         onSkipSilenceToggle = { viewModel.toggleSkipSilence(it) },
         onVolumeNormalizationToggle = { viewModel.toggleVolumeNormalization(it) },

@@ -26,14 +26,11 @@ internal class PlayerSubtitleFiles(
     private val scope: CoroutineScope,
     private val networkDispatcher: CoroutineDispatcher,
 ) {
-    /**
-     * Adds the subtitle file at [uri] to the device file or download that is playing and remembers
-     * it for that video; false when it is not a subtitle file Flow can read.
-     */
+    /** Adds the subtitle file at [uri] to the video that is playing and remembers it for that video. */
     suspend fun add(uri: Uri): Boolean {
         val videoId = playerManager.playerState.value.currentVideoId ?: return false
         val caption = localSubtitles.pick(videoId, uri) ?: return false
-        return withContext(Dispatchers.Main) { playerManager.addLocalCaption(caption) }
+        return withContext(Dispatchers.Main) { playerManager.addSubtitleCaption(caption) }
     }
 
     /** The folder of the device file or download that is playing, for the subtitle file picker. */
